@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from relayflow.api.routes.health import router as health_router
 from relayflow.api.routes.integrations import router as integrations_router
+from relayflow.api.routes.ops import router as ops_router
 from relayflow.api.routes.webhook_subscriptions import (
     router as webhook_subscriptions_router,
 )
@@ -20,3 +21,4 @@ app.include_router(health_router)
 app.include_router(integrations_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
 app.include_router(webhook_subscriptions_router, prefix="/api/v1")
+app.include_router(ops_router, prefix="/api/v1")
