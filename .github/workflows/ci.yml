@@ -1,0 +1,68 @@
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-quality:
+    name: Python quality and tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Run Ruff
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest -q
+
+  docker-validation:
+    name: Docker configuration and build
+    runs-on: ubuntu-latest
+
+    env:
+      POSTGRES_DB: relayflow
+      POSTGRES_USER: relayflow
+      POSTGRES_PASSWORD: ci-only-password
+      DATABASE_URL_DOCKER: postgresql+psycopg://relayflow:ci-only-password@postgres:5432/relayflow
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare local environment file
+        run: touch .env
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build Docker images
+        run: docker compose build
