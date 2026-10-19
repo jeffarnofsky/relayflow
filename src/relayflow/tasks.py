@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any
@@ -5,12 +7,19 @@ from uuid import UUID, uuid4
 
 import httpx2
 from sqlalchemy import select, update
+from telegram.error import TelegramError
 
 from relayflow.celery_app import celery_app
+from relayflow.core.config import settings
 from relayflow.core.credentials import decrypt_auth_config
 from relayflow.core.http_client import (
     UnsafeEndpointError,
     execute_http_request,
+)
+from relayflow.core.telegram_notifications import (
+    build_run_notification,
+    parse_allowed_telegram_user_ids,
+    send_telegram_message,
 )
 from relayflow.db.session import SessionLocal
 from relayflow.models.integration import Integration
@@ -24,6 +33,9 @@ STALE_RUN_ERROR = (
     "Execution exceeded the allowed runtime. "
     "The run was marked failed to avoid an unsafe automatic replay."
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _claim_run(
@@ -98,8 +110,13 @@ def _update_run_if_running(run_id: UUID, **values: Any) -> str:
         )
 
         if result.rowcount == 1:
+            saved_status = str(values.get("status", "running"))
             db.commit()
-            return str(values.get("status", "running"))
+
+            if saved_status in {"succeeded", "failed"}:
+                _enqueue_run_notifications(run_id)
+
+            return saved_status
 
         db.rollback()
         current = db.get(Run, run_id)
@@ -251,11 +268,16 @@ def reconcile_stale_runs() -> dict[str, int]:
                 error_message=STALE_RUN_ERROR,
                 completed_at=now,
             )
+            .returning(Run.id)
         )
-        count = max(result.rowcount or 0, 0)
+
+        stale_run_ids = list(result.scalars().all())
         db.commit()
 
-    return {"marked_failed": count}
+    for stale_run_id in stale_run_ids:
+        _enqueue_run_notifications(stale_run_id)
+
+    return {"marked_failed": len(stale_run_ids)}
 
 
 WEBHOOK_QUEUE_ERROR = "Unable to enqueue webhook-triggered run."
@@ -416,3 +438,80 @@ def reconcile_stale_webhook_events() -> dict[str, int]:
         process_webhook_event.apply_async(args=[str(event_id)])
 
     return {"requeued": len(event_ids)}
+
+
+@celery_app.task(
+    name="relayflow.send_telegram_run_notification",
+    autoretry_for=(TelegramError,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    max_retries=3,
+)
+def send_telegram_run_notification(
+    run_id: str,
+    chat_id: int,
+) -> dict[str, str]:
+    token = settings.telegram_bot_token
+
+    if not token:
+        return {"status": "skipped", "reason": "telegram_not_configured"}
+
+    parsed_run_id = UUID(run_id)
+
+    with SessionLocal() as db:
+        run = db.get(Run, parsed_run_id)
+
+        if run is None:
+            return {"status": "skipped", "reason": "run_not_found"}
+
+        if run.status not in {"succeeded", "failed"}:
+            return {"status": "skipped", "reason": "run_not_finished"}
+
+        integration = db.get(Integration, run.integration_id)
+
+        if integration is None:
+            return {"status": "skipped", "reason": "integration_not_found"}
+
+        message = build_run_notification(run, integration)
+
+    asyncio.run(
+        send_telegram_message(
+            token=token,
+            chat_id=chat_id,
+            message=message,
+        )
+    )
+
+    return {
+        "status": "sent",
+        "run_id": run_id,
+        "chat_id": str(chat_id),
+    }
+
+
+def _enqueue_run_notifications(run_id: UUID) -> None:
+    if not settings.telegram_bot_token:
+        return
+
+    try:
+        chat_ids = parse_allowed_telegram_user_ids(settings.telegram_allowed_user_ids)
+    except ValueError:
+        logger.error("Telegram notifications disabled: invalid allowed user IDs.")
+        return
+
+    if not chat_ids:
+        logger.warning("Telegram notifications enabled without an allowed user ID.")
+        return
+
+    for chat_id in chat_ids:
+        try:
+            send_telegram_run_notification.apply_async(
+                args=[str(run_id), chat_id],
+            )
+        except Exception:
+            # Do not fail the already-completed Run because notification
+            # dispatch failed. The error is recorded without printing secrets.
+            logger.exception(
+                "Could not enqueue Telegram notification for Run %s.",
+                run_id,
+            )
