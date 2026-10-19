@@ -1,6 +1,8 @@
+
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-relayflow}
       POSTGRES_USER: ${POSTGRES_USER:-relayflow}
@@ -8,27 +10,120 @@ services:
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
-      - relayflow_pgdata:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test:
-        - CMD-SHELL
-        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+        ]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 10
-      start_period: 5s
-    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  migrate:
+    build: .
+    restart: "no"
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?Set DATABASE_URL_DOCKER in .env}
+      REDIS_URL: redis://redis:6379/0
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
     restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?Set DATABASE_URL_DOCKER in .env}
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?Set DATABASE_URL_DOCKER in .env}
+      REDIS_URL: redis://redis:6379/0
+    command:
+      [
+        "celery",
+        "-A",
+        "relayflow.celery_app:celery_app",
+        "worker",
+        "--loglevel=INFO"
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  beat:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:?Set DATABASE_URL_DOCKER in .env}
+      REDIS_URL: redis://redis:6379/0
+    command:
+      [
+        "celery",
+        "-A",
+        "relayflow.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/var/lib/celery/celerybeat-schedule"
+      ]
+    volumes:
+      - celerybeat_data:/var/lib/celery
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
-  relayflow_pgdata:
+  postgres_data:
+  redis_data:
+  celerybeat_data:

@@ -2,6 +2,9 @@ from telegram import Bot
 
 from relayflow.models.integration import Integration
 from relayflow.models.run import Run
+import logging
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TERMINAL_RUN_STATUSES = {"succeeded", "failed"}
 

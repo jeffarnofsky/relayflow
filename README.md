@@ -1,4 +1,3 @@
-
 # RelayFlow
 
 RelayFlow is a Python service for managing API integrations, executing
@@ -37,7 +36,7 @@ Client / Webhook Sender
                      +---- HTTP Integration
                      |
                      +---- Telegram
-                     
+
 Celery Beat schedules maintenance and reconciliation tasks.
 ```
 
