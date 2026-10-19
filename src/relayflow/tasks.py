@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx2
 from sqlalchemy import select, update
@@ -16,6 +16,7 @@ from relayflow.db.session import SessionLocal
 from relayflow.models.integration import Integration
 from relayflow.models.run import Run
 from relayflow.models.webhook_event import WebhookEvent
+from relayflow.models.webhook_subscription import WebhookSubscription
 
 STALE_RUN_MINUTES = 15
 
@@ -257,46 +258,161 @@ def reconcile_stale_runs() -> dict[str, int]:
     return {"marked_failed": count}
 
 
-@celery_app.task(name="relayflow.process_webhook_event")
-def process_webhook_event(event_id: str) -> dict[str, str]:
+WEBHOOK_QUEUE_ERROR = "Unable to enqueue webhook-triggered run."
+
+
+@celery_app.task(
+    bind=True,
+    name="relayflow.process_webhook_event",
+    max_retries=3,
+)
+def process_webhook_event(
+    self,
+    event_id: str,
+) -> dict[str, str | int]:
     parsed_event_id = UUID(event_id)
+    pending_runs: list[tuple[str, str]] = []
 
     with SessionLocal() as db:
-        # The row lock and status check prevent duplicate task deliveries
-        # from processing the same received event concurrently.
         event = db.scalar(
             select(WebhookEvent).where(WebhookEvent.id == parsed_event_id).with_for_update()
         )
 
         if event is None:
-            return {
-                "event_id": event_id,
-                "status": "missing",
-            }
+            return {"event_id": event_id, "status": "missing"}
 
-        if event.status != "received":
-            return {
-                "event_id": event_id,
-                "status": event.status,
-            }
+        if event.status == "processed":
+            return {"event_id": event_id, "status": "processed"}
 
+        if event.status not in {"received", "processing", "failed"}:
+            return {"event_id": event_id, "status": event.status}
+
+        event.status = "processing"
+        event.error_message = None
+
+        subscriptions = db.scalars(
+            select(WebhookSubscription).where(
+                WebhookSubscription.source == event.source,
+                WebhookSubscription.event_type == event.event_type,
+                WebhookSubscription.is_active.is_(True),
+            )
+        ).all()
+
+        for subscription in subscriptions:
+            integration = db.get(Integration, subscription.integration_id)
+
+            if integration is None or not integration.is_active:
+                continue
+
+            run = db.scalar(
+                select(Run)
+                .where(
+                    Run.webhook_event_id == event.id,
+                    Run.integration_id == integration.id,
+                )
+                .with_for_update()
+            )
+
+            if run is None:
+                run_id = uuid4()
+                task_id = str(uuid4())
+
+                run = Run(
+                    id=run_id,
+                    integration_id=integration.id,
+                    webhook_event_id=event.id,
+                    celery_task_id=task_id,
+                    status="queued",
+                )
+
+                db.add(run)
+                db.flush()
+
+                pending_runs.append((str(run_id), task_id))
+
+            elif run.status == "failed" and run.error_message == WEBHOOK_QUEUE_ERROR:
+                # Retry only failures caused by enqueueing.
+                # Do not replay completed HTTP requests.
+                task_id = str(uuid4())
+                run.status = "queued"
+                run.celery_task_id = task_id
+                run.error_message = None
+                run.completed_at = None
+
+                pending_runs.append((str(run.id), task_id))
+
+            elif run.status == "queued":
+                task_id = run.celery_task_id or str(uuid4())
+                run.celery_task_id = task_id
+
+                pending_runs.append((str(run.id), task_id))
+
+        db.commit()
+
+    for run_id, task_id in pending_runs:
         try:
-            event.status = "processing"
+            execute_integration_run.apply_async(
+                args=[run_id],
+                task_id=task_id,
+            )
+        except Exception as exc:
+            with SessionLocal() as db:
+                run = db.get(Run, UUID(run_id))
 
-            # Future stage: route the validated event to a workflow or
-            # integration handler here. No external side effects occur yet.
+                if run is not None and run.status == "queued":
+                    run.status = "failed"
+                    run.error_message = WEBHOOK_QUEUE_ERROR
+                    run.completed_at = datetime.now(UTC)
 
+                event = db.get(WebhookEvent, parsed_event_id)
+
+                if event is not None:
+                    event.status = "failed"
+                    event.error_message = "One or more integration runs could not be queued."
+
+                db.commit()
+
+            raise self.retry(
+                exc=exc,
+                countdown=2**self.request.retries,
+            ) from exc
+
+    with SessionLocal() as db:
+        event = db.scalar(
+            select(WebhookEvent).where(WebhookEvent.id == parsed_event_id).with_for_update()
+        )
+
+        if event is not None and event.status != "processed":
             event.status = "processed"
             event.processed_at = datetime.now(UTC)
             event.error_message = None
-
             db.commit()
-
-        except Exception:
-            db.rollback()
-            raise
 
     return {
         "event_id": event_id,
         "status": "processed",
+        "runs_queued": len(pending_runs),
     }
+
+
+@celery_app.task(name="relayflow.reconcile_stale_webhook_events")
+def reconcile_stale_webhook_events() -> dict[str, int]:
+    cutoff = datetime.now(UTC) - timedelta(minutes=5)
+
+    with SessionLocal() as db:
+        event_ids = list(
+            db.scalars(
+                select(WebhookEvent.id)
+                .where(
+                    WebhookEvent.status.in_(["received", "processing", "failed"]),
+                    WebhookEvent.received_at < cutoff,
+                )
+                .order_by(WebhookEvent.received_at.asc())
+                .limit(100)
+            ).all()
+        )
+
+    for event_id in event_ids:
+        process_webhook_event.apply_async(args=[str(event_id)])
+
+    return {"requeued": len(event_ids)}

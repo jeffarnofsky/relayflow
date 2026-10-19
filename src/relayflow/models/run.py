@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -31,6 +32,11 @@ class Run(Base):
         CheckConstraint(
             "attempts >= 0",
             name="attempts_nonnegative",
+        ),
+        UniqueConstraint(
+            "webhook_event_id",
+            "integration_id",
+            name="uq_run_webhook_event_integration",
         ),
     )
 
@@ -105,4 +111,11 @@ class Run(Base):
 
     integration: Mapped["Integration"] = relationship(
         back_populates="runs",
+    )
+
+    webhook_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("webhook_events.id"),
+        nullable=True,
+        index=True,
     )

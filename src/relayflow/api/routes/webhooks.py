@@ -176,13 +176,15 @@ async def receive_webhook(
 
     # If an earlier delivery was saved but its task could not be queued,
     # a retry with the same event ID can enqueue it again.
-    should_enqueue = not duplicate or event.status == "received"
+    should_enqueue = not duplicate or event.status in {
+        "received",
+        "failed",
+    }
 
     if should_enqueue:
         try:
             process_webhook_event.apply_async(
                 args=[str(event.id)],
-                task_id=f"webhook-{event.id}",
             )
         except Exception as exc:
             raise HTTPException(
