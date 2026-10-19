@@ -20,4 +20,15 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_ignore_result=False,
     result_expires=3600,
+    task_reject_on_worker_lost=True,
+)
+
+task_reject_on_worker_lost = (True,)
+beat_schedule = (
+    {
+        "relayflow-reconcile-stale-runs": {
+            "task": "relayflow.reconcile_stale_runs",
+            "schedule": 60.0,
+        },
+    },
 )

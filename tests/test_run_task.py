@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -26,6 +27,42 @@ def setup_fake_task_db(monkeypatch: pytest.MonkeyPatch):
         error_message=None,
         duration_ms=None,
     )
+
+    def fake_claim(requested_run_id):
+        assert requested_run_id == run_id
+
+        if run.status != "queued":
+            return False, run.status, None, None
+
+        run.status = "running"
+        run.attempts += 1
+        run.started_at = datetime.now(UTC)
+
+        return (
+            True,
+            "running",
+            {
+                "url": "https://example.com/",
+                "method": "GET",
+                "headers": {},
+                "body": None,
+            },
+            None,
+        )
+
+    def fake_update(requested_run_id, **values):
+        assert requested_run_id == run_id
+
+        if run.status != "running":
+            return run.status
+
+        for field_name, value in values.items():
+            setattr(run, field_name, value)
+
+        return run.status
+
+    monkeypatch.setattr(tasks, "_claim_run", fake_claim)
+    monkeypatch.setattr(tasks, "_update_run_if_running", fake_update)
 
     integration = SimpleNamespace(
         id=integration_id,
@@ -160,3 +197,25 @@ def test_unsafe_endpoint_fails_run(
     assert run.status == "failed"
     assert run.error_message == error_message
     assert run.completed_at is not None
+
+
+def test_duplicate_delivery_does_not_repeat_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id, run = setup_fake_task_db(monkeypatch)
+    run.status = "succeeded"
+    run.attempts = 1
+
+    def unexpected_request(**kwargs):
+        pytest.fail("A completed run must not issue another HTTP request.")
+
+    monkeypatch.setattr(
+        tasks,
+        "execute_http_request",
+        unexpected_request,
+    )
+
+    result = tasks.execute_integration_run.run(str(run_id))
+
+    assert result["status"] == "succeeded"
+    assert run.attempts == 1
