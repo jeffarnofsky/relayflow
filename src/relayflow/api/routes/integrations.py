@@ -13,11 +13,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from relayflow.core.credentials import (
+    CredentialConfigurationError,
+    encrypt_auth_config,
+)
 from relayflow.core.security import require_admin_api_key
 from relayflow.db.session import get_db
 from relayflow.models import Integration
 from relayflow.models.run import Run
 from relayflow.schemas.integration import (
+    BearerAuthConfig,
     IntegrationCreate,
     IntegrationRead,
     IntegrationUpdate,
@@ -30,6 +35,26 @@ router = APIRouter(
     tags=["Integrations"],
     dependencies=[Depends(require_admin_api_key)],
 )
+
+
+def _encrypt_auth_config_input(
+    auth_config: BearerAuthConfig | None,
+) -> str | None:
+    if auth_config is None:
+        return None
+
+    payload = {
+        "type": auth_config.type,
+        "token": auth_config.token.get_secret_value(),
+    }
+
+    try:
+        return encrypt_auth_config(payload)
+    except CredentialConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Credential encryption is not configured.",
+        ) from exc
 
 
 @router.post(
@@ -49,6 +74,7 @@ def create_integration(
         request_headers=payload.request_headers,
         request_body=payload.request_body,
         is_active=payload.is_active,
+        auth_config_encrypted=_encrypt_auth_config_input(payload.auth_config),
     )
 
     db.add(integration)
@@ -118,7 +144,13 @@ def update_integration(
             detail="Integration not found.",
         )
 
-    changes = payload.model_dump(exclude_unset=True)
+    changes = payload.model_dump(
+        exclude_unset=True,
+        exclude={"auth_config"},
+    )
+
+    if "auth_config" in payload.model_fields_set:
+        changes["auth_config_encrypted"] = _encrypt_auth_config_input(payload.auth_config)
 
     if not changes:
         raise HTTPException(

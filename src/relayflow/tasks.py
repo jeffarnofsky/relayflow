@@ -7,6 +7,7 @@ import httpx2
 from sqlalchemy import update
 
 from relayflow.celery_app import celery_app
+from relayflow.core.credentials import decrypt_auth_config
 from relayflow.core.http_client import (
     UnsafeEndpointError,
     execute_http_request,
@@ -76,6 +77,7 @@ def _claim_run(
             "method": integration.http_method,
             "headers": dict(integration.request_headers),
             "body": integration.request_body,
+            "auth_config_encrypted": integration.auth_config_encrypted,
         }
 
         return True, "running", request_data, None
@@ -156,6 +158,7 @@ def execute_integration_run(
             method=request_data["method"],
             headers=request_data["headers"],
             body=request_data["body"],
+            auth_config=decrypt_auth_config(request_data.get("auth_config_encrypted")),
         )
 
     except (httpx2.TimeoutException, httpx2.NetworkError) as exc:

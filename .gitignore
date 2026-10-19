@@ -26,3 +26,9 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# Celery Beat persistent scheduler state
+celerybeat-schedule*
+
+# Generate a unique key with cryptography.fernet.Fernet.generate_key()
+FERNET_KEY=

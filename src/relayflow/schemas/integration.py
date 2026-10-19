@@ -6,6 +6,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     field_validator,
     model_validator,
 )
@@ -38,11 +39,24 @@ def validate_request_headers(
     return value
 
 
+class BearerAuthConfig(BaseModel):
+    type: Literal["bearer"] = "bearer"
+    token: SecretStr
+
+    @field_validator("token")
+    @classmethod
+    def token_must_not_be_blank(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("Bearer token must not be blank.")
+        return value
+
+
 class IntegrationCreate(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         str_strip_whitespace=True,
     )
+    auth_config: BearerAuthConfig | None = None
 
     name: str = Field(min_length=3, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
@@ -68,6 +82,7 @@ class IntegrationUpdate(BaseModel):
         extra="forbid",
         str_strip_whitespace=True,
     )
+    auth_config: BearerAuthConfig | None = None
 
     name: str | None = Field(default=None, min_length=3, max_length=120)
     description: str | None = Field(default=None, max_length=2000)

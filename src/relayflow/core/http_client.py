@@ -104,9 +104,20 @@ def execute_http_request(
     method: str,
     headers: dict[str, str],
     body: dict[str, Any] | list[Any] | None,
+    auth_config: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
     validate_endpoint_url(url)
     safe_headers = _prepare_headers(headers)
+    if auth_config is not None:
+        if auth_config.get("type") != "bearer":
+            raise UnsafeEndpointError("Unsupported authentication configuration.")
+
+        token = auth_config.get("token")
+
+        if not isinstance(token, str) or not token.strip():
+            raise UnsafeEndpointError("Bearer token is invalid.")
+
+        safe_headers["Authorization"] = f"Bearer {token}"
 
     with httpx2.Client(
         timeout=REQUEST_TIMEOUT_SECONDS,
