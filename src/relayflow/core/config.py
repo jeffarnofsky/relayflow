@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     admin_api_key: str = "development-only-change-me"
     fernet_key: str | None = None
+    webhook_signing_secret: str | None = None
 
     telegram_bot_token: str | None = None
     telegram_allowed_user_ids: str = ""

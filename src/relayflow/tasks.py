@@ -4,7 +4,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx2
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from relayflow.celery_app import celery_app
 from relayflow.core.credentials import decrypt_auth_config
@@ -15,6 +15,7 @@ from relayflow.core.http_client import (
 from relayflow.db.session import SessionLocal
 from relayflow.models.integration import Integration
 from relayflow.models.run import Run
+from relayflow.models.webhook_event import WebhookEvent
 
 STALE_RUN_MINUTES = 15
 
@@ -254,3 +255,48 @@ def reconcile_stale_runs() -> dict[str, int]:
         db.commit()
 
     return {"marked_failed": count}
+
+
+@celery_app.task(name="relayflow.process_webhook_event")
+def process_webhook_event(event_id: str) -> dict[str, str]:
+    parsed_event_id = UUID(event_id)
+
+    with SessionLocal() as db:
+        # The row lock and status check prevent duplicate task deliveries
+        # from processing the same received event concurrently.
+        event = db.scalar(
+            select(WebhookEvent).where(WebhookEvent.id == parsed_event_id).with_for_update()
+        )
+
+        if event is None:
+            return {
+                "event_id": event_id,
+                "status": "missing",
+            }
+
+        if event.status != "received":
+            return {
+                "event_id": event_id,
+                "status": event.status,
+            }
+
+        try:
+            event.status = "processing"
+
+            # Future stage: route the validated event to a workflow or
+            # integration handler here. No external side effects occur yet.
+
+            event.status = "processed"
+            event.processed_at = datetime.now(UTC)
+            event.error_message = None
+
+            db.commit()
+
+        except Exception:
+            db.rollback()
+            raise
+
+    return {
+        "event_id": event_id,
+        "status": "processed",
+    }
