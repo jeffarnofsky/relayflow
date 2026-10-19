@@ -219,3 +219,46 @@ def test_duplicate_delivery_does_not_repeat_request(
 
     assert result["status"] == "succeeded"
     assert run.attempts == 1
+
+
+def test_network_timeout_fails_after_retries_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id, run = setup_fake_task_db(monkeypatch)
+    timeout_error = httpx2.TimeoutException("request timed out")
+    retry_calls = []
+
+    def raise_timeout(**kwargs):
+        raise timeout_error
+
+    class RetryRequested(Exception):
+        pass
+
+    def fake_retry(*, exc, countdown):
+        retry_calls.append((exc, countdown))
+        raise RetryRequested()
+
+    monkeypatch.setattr(
+        tasks,
+        "execute_http_request",
+        raise_timeout,
+    )
+    monkeypatch.setattr(
+        tasks.execute_integration_run,
+        "retry",
+        fake_retry,
+    )
+    monkeypatch.setattr(
+        tasks.execute_integration_run.request,
+        "retries",
+        tasks.execute_integration_run.max_retries,
+    )
+
+    result = tasks.execute_integration_run.run(str(run_id))
+
+    assert result["status"] == "failed"
+    assert run.status == "failed"
+    assert run.attempts == 1
+    assert run.error_message == "TimeoutException"
+    assert run.completed_at is not None
+    assert retry_calls == []
