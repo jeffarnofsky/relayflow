@@ -2,6 +2,7 @@ import ipaddress
 import socket
 
 import httpcore2
+import httpx2
 import pytest
 
 from relayflow.core import http_client
@@ -131,17 +132,33 @@ def test_pinned_backend_rejects_unexpected_destination() -> None:
         backend.connect_tcp("internal.example", 443)
 
 
-def test_transport_installs_pinned_backend() -> None:
-    transport = http_client._create_pinned_transport(_endpoint())
+def test_custom_transport_uses_public_network_backend_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
 
-    try:
-        assert isinstance(transport._pool, httpcore2.ConnectionPool)
-        assert isinstance(
-            transport._pool._network_backend,
-            http_client._PinnedNetworkBackend,
-        )
-    finally:
-        transport.close()
+    class FakePool:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(http_client.httpcore2, "ConnectionPool", FakePool)
+
+    transport = http_client._PinnedHTTPTransport(_endpoint())
+
+    assert isinstance(captured["ssl_context"], __import__("ssl").SSLContext)
+    assert captured["network_backend"] is transport.network_backend
+    assert isinstance(captured["network_backend"], http_client._PinnedNetworkBackend)
+    assert captured["retries"] == 0
+    transport.close()
+
+
+def test_httpcore_timeout_is_mapped_to_httpx_timeout() -> None:
+    with pytest.raises(httpx2.ConnectTimeout, match="timed out"):
+        with http_client._map_httpcore_exceptions():
+            raise httpcore2.ConnectTimeout("timed out")
 
 
 def test_bearer_auth_is_added_to_request(
@@ -186,7 +203,7 @@ def test_bearer_auth_is_added_to_request(
     )
     monkeypatch.setattr(
         http_client,
-        "_create_pinned_transport",
+        "_PinnedHTTPTransport",
         lambda endpoint: fake_transport,
     )
     monkeypatch.setattr(http_client.httpx2, "Client", FakeClient)

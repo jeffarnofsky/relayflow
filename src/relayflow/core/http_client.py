@@ -1,6 +1,8 @@
 import ipaddress
 import socket
 import time
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -32,12 +34,28 @@ FORBIDDEN_HEADERS = {
     "upgrade",
 }
 
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+HTTPCORE_EXC_MAP: dict[type[Exception], type[httpx2.HTTPError]] = {
+    httpcore2.TimeoutException: httpx2.TimeoutException,
+    httpcore2.ConnectTimeout: httpx2.ConnectTimeout,
+    httpcore2.ReadTimeout: httpx2.ReadTimeout,
+    httpcore2.WriteTimeout: httpx2.WriteTimeout,
+    httpcore2.PoolTimeout: httpx2.PoolTimeout,
+    httpcore2.NetworkError: httpx2.NetworkError,
+    httpcore2.ConnectError: httpx2.ConnectError,
+    httpcore2.ReadError: httpx2.ReadError,
+    httpcore2.WriteError: httpx2.WriteError,
+    httpcore2.ProxyError: httpx2.ProxyError,
+    httpcore2.UnsupportedProtocol: httpx2.UnsupportedProtocol,
+    httpcore2.ProtocolError: httpx2.ProtocolError,
+    httpcore2.LocalProtocolError: httpx2.LocalProtocolError,
+    httpcore2.RemoteProtocolError: httpx2.RemoteProtocolError,
+}
+
 
 class UnsafeEndpointError(ValueError):
     """Raised when an integration endpoint is not permitted."""
-
-
-IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 @dataclass(frozen=True)
@@ -62,7 +80,7 @@ def _normalize_hostname(hostname: str) -> str:
 
 
 def validate_endpoint_url(url: str) -> _ValidatedEndpoint:
-    """Validate a URL and return the public IP addresses resolved for it."""
+    """Validate an endpoint and return its resolved public IP addresses."""
     if not url or "\\" in url or any(ord(char) < 32 for char in url):
         raise UnsafeEndpointError("The endpoint URL is invalid.")
 
@@ -121,7 +139,6 @@ def validate_endpoint_url(url: str) -> _ValidatedEndpoint:
     if len(addresses_list) > MAX_ENDPOINT_ADDRESSES:
         raise UnsafeEndpointError("The endpoint returned too many IP addresses.")
 
-    # Reject the entire DNS response if even one result is not globally routable.
     if any(not address.is_global for address in addresses_list):
         raise UnsafeEndpointError("The endpoint must resolve only to public IP addresses.")
 
@@ -132,8 +149,28 @@ def validate_endpoint_url(url: str) -> _ValidatedEndpoint:
     )
 
 
+@contextmanager
+def _map_httpcore_exceptions() -> Generator[None, None, None]:
+    """Translate httpcore2 failures to HTTPX2 exceptions used by the app."""
+    try:
+        yield
+    except Exception as exc:
+        mapped_exc: type[httpx2.HTTPError] | None = None
+
+        for core_exc, client_exc in HTTPCORE_EXC_MAP.items():
+            if isinstance(exc, core_exc) and (
+                mapped_exc is None or issubclass(client_exc, mapped_exc)
+            ):
+                mapped_exc = client_exc
+
+        if mapped_exc is None:
+            raise
+
+        raise mapped_exc(str(exc)) from exc
+
+
 class _PinnedNetworkBackend(httpcore2.NetworkBackend):
-    """Connect only to the IP addresses verified during endpoint validation."""
+    """Connect only to IP addresses resolved and validated for one endpoint."""
 
     def __init__(self, endpoint: _ValidatedEndpoint) -> None:
         self._hostname = endpoint.hostname
@@ -166,7 +203,7 @@ class _PinnedNetworkBackend(httpcore2.NetworkBackend):
                 break
 
             try:
-                # Supplying an IP literal prevents another DNS lookup of the target hostname.
+                # Passing an IP literal avoids resolving the target hostname again.
                 return self._backend.connect_tcp(
                     host=address.compressed,
                     port=port,
@@ -183,23 +220,61 @@ class _PinnedNetworkBackend(httpcore2.NetworkBackend):
         raise httpcore2.ConnectTimeout("The TCP connection timed out.")
 
 
-def _create_pinned_transport(endpoint: _ValidatedEndpoint) -> httpx2.HTTPTransport:
-    # HTTPTransport does not expose network_backend in its public constructor.
-    # Verify the internal API before using it, and pin dependency versions in pyproject.toml.
-    transport = httpx2.HTTPTransport(
-        trust_env=False,
-        proxy=None,
-        uds=None,
-        retries=0,
-    )
+class _ResponseStream(httpx2.SyncByteStream):
+    def __init__(self, stream: Iterable[bytes]) -> None:
+        self._stream = stream
 
-    pool = getattr(transport, "_pool", None)
-    if not isinstance(pool, httpcore2.ConnectionPool) or not hasattr(pool, "_network_backend"):
-        transport.close()
-        raise RuntimeError("The installed HTTP transport does not support pinned networking.")
+    def __iter__(self) -> Iterator[bytes]:
+        with _map_httpcore_exceptions():
+            yield from self._stream
 
-    pool._network_backend = _PinnedNetworkBackend(endpoint)
-    return transport
+    def close(self) -> None:
+        close_stream = getattr(self._stream, "close", None)
+        if close_stream is not None:
+            close_stream()
+
+
+class _PinnedHTTPTransport(httpx2.BaseTransport):
+    """HTTPX2 transport using a public httpcore2 connection-pool API."""
+
+    def __init__(self, endpoint: _ValidatedEndpoint) -> None:
+        self.network_backend = _PinnedNetworkBackend(endpoint)
+        self.connection_pool = httpcore2.ConnectionPool(
+            ssl_context=httpcore2.default_ssl_context(),
+            network_backend=self.network_backend,
+            retries=0,
+        )
+
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        assert isinstance(request.stream, httpx2.SyncByteStream)
+
+        core_request = httpcore2.Request(
+            method=request.method,
+            url=httpcore2.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+
+        with _map_httpcore_exceptions():
+            core_response = self.connection_pool.handle_request(core_request)
+
+        assert isinstance(core_response.stream, Iterable)
+
+        return httpx2.Response(
+            status_code=core_response.status,
+            headers=core_response.headers,
+            stream=_ResponseStream(core_response.stream),
+            extensions=core_response.extensions,
+        )
+
+    def close(self) -> None:
+        self.connection_pool.close()
 
 
 def _prepare_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -240,7 +315,7 @@ def execute_http_request(
 
         safe_headers["Authorization"] = f"Bearer {token}"
 
-    transport = _create_pinned_transport(endpoint)
+    transport = _PinnedHTTPTransport(endpoint)
 
     with httpx2.Client(
         transport=transport,
