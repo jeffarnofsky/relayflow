@@ -4,7 +4,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_DEFAULT_TIMEOUT=300 \
     PIP_RETRIES=10
 
 WORKDIR /app
@@ -17,8 +17,8 @@ COPY src ./src
 
 RUN python -m pip install \
     --no-cache-dir \
-    --timeout=120 \
-    --retries=3 \
+    --timeout=300 \
+    --retries=10 \
     --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
     .
 
