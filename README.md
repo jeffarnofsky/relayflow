@@ -196,6 +196,12 @@ pytest -q
 For local execution, ensure PostgreSQL and Redis are running and the
 local database URL uses the host-facing port configured in `.env`.
 
+Apply database migrations before starting the local API:
+
+```bash
+alembic upgrade head
+```
+
 Run the API:
 
 ```bash
