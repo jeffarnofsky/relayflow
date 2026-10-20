@@ -1,5 +1,8 @@
 # RelayFlow
 
+[![CI](https://github.com/jeffarnofsky/relayflow/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/jeffarnofsky/relayflow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 RelayFlow is a Python service for managing API integrations, executing
 HTTP requests asynchronously, receiving signed webhooks, and notifying
 authorized users through Telegram.
@@ -141,7 +144,7 @@ docker compose -f compose.yaml -f compose.production.yaml config --quiet
 docker compose -f compose.yaml -f compose.production.yaml build
 docker compose -f compose.yaml -f compose.production.yaml run --rm migrate
 docker compose -f compose.yaml -f compose.production.yaml up -d
-````
+```
 
 ## API
 
@@ -251,11 +254,16 @@ the scheduler design explicitly supports that arrangement.
 - Never commit `.env`, API tokens, Fernet keys, or Telegram bot tokens.
 - Rotate any credential that has appeared in a shared log.
 - Do not store raw Bearer tokens in request headers persisted to the database.
+- Bearer-authenticated integrations require HTTPS; plain HTTP requests with Bearer credentials are rejected.
 - Use HTTPS for production-facing endpoints.
 - Restrict outbound network access and review SSRF protections before
   exposing integration execution to untrusted users.
 - Keep database and Redis ports private in production.
 - Configure backups and a secret management solution before production use.
+
+## License
+
+RelayFlow is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Current scope
 
