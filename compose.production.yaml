@@ -1,0 +1,10 @@
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  api:
+    environment:
+      APP_ENV: production

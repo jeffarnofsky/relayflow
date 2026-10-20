@@ -121,6 +121,28 @@ docker compose down
 Do not use `docker compose down -v` unless you intend to remove the
 database, Redis, and Beat volumes.
 
+## Production deployment
+
+`compose.production.yaml` provides a production-oriented override for
+a single host using a reverse proxy that runs on the host itself.
+
+Before deployment:
+
+- Create a production `.env` with unique, strong secrets.
+- Set `ADMIN_API_KEY`, `FERNET_KEY`, and `WEBHOOK_SIGNING_SECRET`.
+- Configure HTTPS termination in the host-level reverse proxy.
+- Keep PostgreSQL and Redis inaccessible from public networks.
+- Arrange database backups and test your recovery procedure.
+
+Validate and deploy with the production override:
+
+```bash
+docker compose -f compose.yaml -f compose.production.yaml config --quiet
+docker compose -f compose.yaml -f compose.production.yaml build
+docker compose -f compose.yaml -f compose.production.yaml run --rm migrate
+docker compose -f compose.yaml -f compose.production.yaml up -d
+````
+
 ## API
 
 The API is available locally at:
