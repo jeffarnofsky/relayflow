@@ -306,6 +306,9 @@ def execute_http_request(
     safe_headers = _prepare_headers(headers)
 
     if auth_config is not None:
+        if urlsplit(url).scheme.lower() != "https":
+            raise UnsafeEndpointError("Bearer authentication requires an HTTPS endpoint.")
+
         if auth_config.get("type") != "bearer":
             raise UnsafeEndpointError("Unsupported authentication configuration.")
 

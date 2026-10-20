@@ -225,3 +225,31 @@ def test_bearer_auth_is_added_to_request(
     assert captured["client_options"]["follow_redirects"] is False
     assert captured["client_options"]["trust_env"] is False
     assert captured["client_options"]["transport"] is fake_transport
+
+
+def test_bearer_auth_rejects_plain_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_client,
+        "validate_endpoint_url",
+        lambda url: _endpoint(port=80),
+    )
+
+    def unexpected_transport(endpoint):
+        pytest.fail("Transport must not be created for HTTP bearer authentication.")
+
+    monkeypatch.setattr(
+        http_client,
+        "_PinnedHTTPTransport",
+        unexpected_transport,
+    )
+
+    with pytest.raises(UnsafeEndpointError, match="requires an HTTPS endpoint"):
+        execute_http_request(
+            url="http://example.com/",
+            method="GET",
+            headers={},
+            body=None,
+            auth_config={"type": "bearer", "token": "test-token"},
+        )
