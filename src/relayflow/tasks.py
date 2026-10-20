@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx2
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from telegram.error import TelegramError
 
 from relayflow.celery_app import celery_app
@@ -419,25 +419,50 @@ def process_webhook_event(
 
 @celery_app.task(name="relayflow.reconcile_stale_webhook_events")
 def reconcile_stale_webhook_events() -> dict[str, int]:
-    cutoff = datetime.now(UTC) - timedelta(minutes=5)
+    now = datetime.now(UTC)
+    stale_cutoff = now - timedelta(minutes=5)
+    reconcile_cutoff = now - timedelta(minutes=5)
 
     with SessionLocal() as db:
-        event_ids = list(
+        events = list(
             db.scalars(
-                select(WebhookEvent.id)
+                select(WebhookEvent)
                 .where(
                     WebhookEvent.status.in_(["received", "processing", "failed"]),
-                    WebhookEvent.received_at < cutoff,
+                    WebhookEvent.received_at < stale_cutoff,
+                    or_(
+                        WebhookEvent.last_reconciled_at.is_(None),
+                        WebhookEvent.last_reconciled_at < reconcile_cutoff,
+                    ),
                 )
                 .order_by(WebhookEvent.received_at.asc())
                 .limit(100)
+                .with_for_update(skip_locked=True)
             ).all()
         )
 
-    for event_id in event_ids:
-        process_webhook_event.apply_async(args=[str(event_id)])
+        event_ids = [event.id for event in events]
 
-    return {"requeued": len(event_ids)}
+        for event in events:
+            event.last_reconciled_at = now
+
+        db.commit()
+
+    queued_count = 0
+
+    for event_id in event_ids:
+        try:
+            process_webhook_event.apply_async(args=[str(event_id)])
+        except Exception:
+            logger.exception(
+                "Failed to enqueue stale webhook event %s for reconciliation",
+                event_id,
+            )
+            continue
+
+        queued_count += 1
+
+    return {"requeued": queued_count}
 
 
 @celery_app.task(

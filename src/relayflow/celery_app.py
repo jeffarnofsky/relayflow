@@ -21,13 +21,13 @@ celery_app.conf.update(
     task_ignore_result=False,
     result_expires=3600,
     task_reject_on_worker_lost=True,
-)
-
-task_reject_on_worker_lost = (True,)
-beat_schedule = (
-    {
+    beat_schedule={
         "relayflow-reconcile-stale-webhooks": {
             "task": "relayflow.reconcile_stale_webhook_events",
+            "schedule": 60.0,
+        },
+        "relayflow-reconcile-stale-runs": {
+            "task": "relayflow.reconcile_stale_runs",
             "schedule": 60.0,
         },
     },
